@@ -1,7 +1,13 @@
 module Main where
 
+-- Local modules
 import Colours
+import Drawing
+import Types
+import qualified Config as Cfg
 
+-- Miscellaneous imports
+import Data.Maybe
 import Linear.V2
 import System.Exit
 
@@ -17,27 +23,6 @@ import qualified Helm.Sub as Sub
 import qualified Helm.Time as Time
 import qualified Helm.Keyboard as Key
 
-data Model = Model
-  -- The width and height of the Helm window
-  { window  :: V2 Int
-  -- The radius of each circle on the screen
-  , circles :: [Double]
-  -- (Angle on outer circle, velocity)
-  , player :: (Double, Double)
-  }
-
--- Clockwise | Anticlockwise
-data Direction = Forward | Backward deriving Eq
-
--- Possible actions are to create a new circle or do nothing
-data Action = Tick
-            | NewCircle 
-            | Move Direction 
-            | Resize Int Int
-            | Quit
-            | Nil 
-            deriving Eq
-
 config :: GameConfig SDLEngine Model Action
 config = GameConfig
  { initialFn = init
@@ -51,42 +36,49 @@ config = GameConfig
  init = (model, Cmd.none)
   where
   model = Model { window  = (windowDimensions defaultConfig)
-                , circles = [0.0]
+                , circles = [(0.0, Nothing)]
                 , player  = (pi / 2, 0)
                 }
 
  -- We want to add circles when commanded to, and expand existing ones
  update :: Model -> Action -> (Model, Cmd SDLEngine Action)
- update m NewCircle = (m { circles = 0.0:(circles m) }, Cmd.none)
+ update m NewCircle = (m { circles = circles' }, Cmd.none)
+  where
+  -- TODO: update function so that obstacles differ
+  circles' = (0.0, Just (pi/2, 0.1)) : (circles m)
  update m (Move d) = ((m { player = setSpeed (player m) d }), Cmd.none)
   where
-  setSpeed :: (Double, Double) -> Direction -> (Double, Double)
+  setSpeed :: (Angle, Velocity) -> Direction -> (Angle, Velocity)
   setSpeed (x, _) Forward  = (x,  0.05)
   setSpeed (x, _) Backward = (x, -0.05)
 
  update m Quit = (m, Cmd.execute exitSuccess (\_ -> Quit))
  update m Tick = (m { window = (window m)
-                    , circles = concatMap expandOrDel (circles m)
+                    , circles = concatMap updateCircle (circles m)
                     , player  = let (x,v) = (player m) in (x + v, v)
                     }
                  , Cmd.none)
   where
   -- Expand a circle's radius by 5 unless it's no longer visible
-  expandOrDel :: Double -> [Double]
+  expandOrDel :: Radius -> [Radius]
   expandOrDel n = if (n >= cutoff (window m)) then [] else [n + 5]
+
+  updateCircle :: Circle -> [Circle]
+  updateCircle (r, Nothing) = (expandOrDel r) >>= \x -> [(x, Nothing)]
+  updateCircle (r, Just (x,v)) = (expandOrDel r) >>= \z -> [(z, Just (x+v,v))]
 
   -- Determine the cutoff radius for a circle being visible, depending on
   -- window dimensions
-  cutoff :: V2 Int -> Double
+  cutoff :: V2 Int -> Radius
   cutoff (V2 x y) = sqrt ((fromIntegral (x*x + y*y)) / 4.0)
 
  update m (Resize w h) = (m { window = V2 w h }, Cmd.none)
  update m a = (m, Cmd.none)
 
- 
+
  -- Subscribe to update at 60FPS and create a new circle every second
  sub :: Sub SDLEngine Action
- sub = Sub.batch [Time.fps 60 (\t -> Tick)
+ sub = Sub.batch [Time.fps Cfg.fps (\t -> Tick)
                  ,Time.every Time.second (\t -> NewCircle)
                  ,Key.downs (\k -> case k of
                                          Key.LeftKey  -> Move Backward
@@ -105,10 +97,14 @@ config = GameConfig
 
   -- Combination of all of the elements for display
   screen :: Collage SDLEngine
-  screen = collage $ playerCircle:map mkCircle (circles m) ++ [player']
+  screen = collage $ playerCircle : map (mkCircle.fst) (circles m)
+                   ++ [player'] ++ map (\z ->
+                      case z of
+                        (r,Just (x,_)) -> drawObstacle r x
+                        (r,Nothing) -> blank) (circles m)
 
   -- Turn a radius into a green circle. Yellow if it's past playerCircle
-  mkCircle :: Double -> Form SDLEngine
+  mkCircle :: Radius -> Form SDLEngine
   mkCircle r
     | r >= cutoff = outlined (solid yellow) (circle r)
     | otherwise   = outlined (solid green) (circle r)
@@ -123,17 +119,16 @@ config = GameConfig
   playerPosition :: V2 Double
   playerPosition = (pure cutoff) * V2 (cos angle) (sin angle)
 
+  -- Draw a wee circle from polar coordinates (Radius, Angle)
+  drawObstacle :: Double -> Double -> Form SDLEngine
+  drawObstacle r a = move (pure r * V2 (cos a)(sin a)) $ filled red $ circle 10
+
   -- The angle of the player on the playerCircle
   angle = fst $ player m
 
   -- The middle of the window to center the collage at
-  origin = (fromIntegral <$> (window m)) / (V2 2.0 2.0)
+  origin = (fromIntegral <$> (window m)) / (pure 2.0)
 
-  -- A thicker (blue) LineStyle for the static player circle
-  thickBlueLine :: LineStyle
-  thickBlueLine = defaultLine { lineColor = blue
-                              , lineWidth = 4
-                              }
 
 main :: IO ()
 main = do
