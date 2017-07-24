@@ -10,6 +10,7 @@ import qualified Config as Cfg
 import Data.Maybe
 import Linear.V2
 import System.Exit
+import System.Random
 
 import Helm
 import Helm.Engine.SDL
@@ -23,38 +24,49 @@ import qualified Helm.Sub as Sub
 import qualified Helm.Time as Time
 import qualified Helm.Keyboard as Key
 
+-- Initial configuration has the default (800x600) window and one circle
+-- mkInit takes an RNG and adds it to the model it returns
+mkInit :: StdGen -> (Model, Cmd SDLEngine Action)
+mkInit g = (model, Cmd.none)
+ where
+ model = Model { window  = (windowDimensions defaultConfig)
+               , circles = [(0.0, Nothing)]
+               , player  = (pi / 2, 0)
+               , gen     = g
+               }
+
 config :: GameConfig SDLEngine Model Action
 config = GameConfig
- { initialFn = init
+ -- Before we attempt to get the global RNG (and if it fails) mkStdGen
+ -- provides us with a predictable RNG without using IO
+ { initialFn = mkInit (mkStdGen 1)
  , updateFn  = update
  , viewFn    = view
  , subscriptionsFn = sub
  }
  where
- -- Initial configuration has the default (800x600) window and one circle
- init :: (Model, Cmd SDLEngine Action)
- init = (model, Cmd.none)
-  where
-  model = Model { window  = (windowDimensions defaultConfig)
-                , circles = [(0.0, Nothing)]
-                , player  = (pi / 2, 0)
-                }
-
- -- We want to add circles when commanded to, and expand existing ones
  update :: Model -> Action -> (Model, Cmd SDLEngine Action)
- update m NewCircle = (m { circles = circles' }, Cmd.none)
+
+ -- Add a new circle (and obstacle) to the game
+ update m NewCircle = (m { circles = circles'
+                         , gen = g'
+                         }
+                      , Cmd.none)
   where
-  -- TODO: update function so that obstacles differ
-  circles' = (0.0, Just (pi/2, 0.1)) : (circles m)
+  -- Generate random position and velocity for the obstacle
+  (x,g) = randomR (0.0, 6.28) (gen m) :: (Double, StdGen)
+  (v,g') = randomR (-0.2, 0.2) g :: (Double, StdGen)
+  circles' = (0.0, Just (x, v)) : (circles m)
+
+ -- Handle player movement - rotate player either left or right
  update m (Move d) = ((m { player = setSpeed (player m) d }), Cmd.none)
   where
   setSpeed :: (Angle, Velocity) -> Direction -> (Angle, Velocity)
   setSpeed (x, _) Forward  = (x,  0.05)
   setSpeed (x, _) Backward = (x, -0.05)
 
- update m Quit = (m, Cmd.execute exitSuccess (\_ -> Quit))
- update m Tick = (m { window = (window m)
-                    , circles = concatMap updateCircle (circles m)
+ -- Every frame, call updateCircle (on every Circle) and move the player
+ update m Tick = (m { circles = concatMap updateCircle (circles m)
                     , player  = let (x,v) = (player m) in (x + v, v)
                     }
                  , Cmd.none)
@@ -63,6 +75,8 @@ config = GameConfig
   expandOrDel :: Radius -> [Radius]
   expandOrDel n = if (n >= cutoff (window m)) then [] else [n + 5]
 
+  -- Expand a circle and increase the velocity of it's obstacle
+  -- (return a list so that we can concatenate the results)
   updateCircle :: Circle -> [Circle]
   updateCircle (r, Nothing) = (expandOrDel r) >>= \x -> [(x, Nothing)]
   updateCircle (r, Just (x,v)) = (expandOrDel r) >>= \z -> [(z, Just (x+v,v))]
@@ -72,11 +86,18 @@ config = GameConfig
   cutoff :: V2 Int -> Radius
   cutoff (V2 x y) = sqrt ((fromIntegral (x*x + y*y)) / 4.0)
 
+ -- Handle window resize by modifying the window dimensions in the model
  update m (Resize w h) = (m { window = V2 w h }, Cmd.none)
+
+ -- Exit game by killing this process (and announcing success to the OS)
+ update m Quit = (m, Cmd.execute exitSuccess (\_ -> Quit))
  update m a = (m, Cmd.none)
 
-
- -- Subscribe to update at 60FPS and create a new circle every second
+ {- Update at framerate defined in Config
+  - Create a new circle every second
+  - Handle left and right keys to change player direction
+  - Handle `Q` to quit
+  - Tell model to handle resize events -}
  sub :: Sub SDLEngine Action
  sub = Sub.batch [Time.fps Cfg.fps (\t -> Tick)
                  ,Time.every Time.second (\t -> NewCircle)
@@ -101,7 +122,7 @@ config = GameConfig
                    ++ [player'] ++ map (\z ->
                       case z of
                         (r,Just (x,_)) -> drawObstacle r x
-                        (r,Nothing) -> blank) (circles m)
+                        (r,Nothing)    -> blank) (circles m)
 
   -- Turn a radius into a green circle. Yellow if it's past playerCircle
   mkCircle :: Radius -> Form SDLEngine
@@ -112,16 +133,12 @@ config = GameConfig
   -- The outer circle on which the player resides
   playerCircle = outlined thickBlueLine (circle cutoff)
 
-  -- The dot representing the player
-  player' = move playerPosition $ filled red (circle 10)
-
-  -- Angle on playerCircle -> V2 X Y
-  playerPosition :: V2 Double
-  playerPosition = (pure cutoff) * V2 (cos angle) (sin angle)
+  -- The object representing the player
+  player' = moveCartesian (cutoff, angle) redCircle
 
   -- Draw a wee circle from polar coordinates (Radius, Angle)
   drawObstacle :: Double -> Double -> Form SDLEngine
-  drawObstacle r a = move (pure r * V2 (cos a)(sin a)) $ filled red $ circle 10
+  drawObstacle r a = moveCartesian (r,a) redCircle
 
   -- The angle of the player on the playerCircle
   angle = fst $ player m
@@ -132,5 +149,10 @@ config = GameConfig
 
 main :: IO ()
 main = do
+ -- Instantiate the game engine with a default config
  engine <- startup
- run engine config
+
+ -- Get the global random number generator
+ g <- getStdGen
+
+ run engine $ config { initialFn = mkInit g }

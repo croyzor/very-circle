@@ -1,7 +1,7 @@
 module Types where
 
 import Linear.V2
-
+import System.Random
 
 type Angle = Double
 type Velocity = Double
@@ -18,6 +18,8 @@ data Model = Model
   , circles :: [Circle]
   -- (Angle on outer circle, velocity)
   , player :: (Angle, Velocity)
+  -- Random number generator
+  , gen :: StdGen
   }
 
 -- Clockwise | Anticlockwise
